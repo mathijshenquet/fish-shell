@@ -67,14 +67,14 @@ fn empty_wstr() -> &'static wstr {
     Default::default()
 }
 
-pub struct wgetopter_t<'opts, 'args, 'argarray> {
+pub struct wgetopter_t<'opts, 'argarray> {
     /// Argv.
-    argv: &'argarray mut [&'args wstr],
+    argv: &'argarray mut [WString],
 
     /// For communication from `getopt` to the caller. When `getopt` finds an option that takes an
     /// argument, the argument value is returned here. Also, when `ordering` is RETURN_IN_ORDER, each
     /// non-option ARGV-element is returned here.
-    pub woptarg: Option<&'args wstr>,
+    woptarg_idx: Option<(usize, std::ops::Range<usize>)>,
 
     shortopts: &'opts wstr,
     longopts: &'opts [woption<'opts>],
@@ -83,7 +83,7 @@ pub struct wgetopter_t<'opts, 'args, 'argarray> {
     /// returned was found. This allows us to pick up the scan where we left off.
     ///
     /// If this is empty, it means resume the scan by advancing to the next ARGV-element.
-    pub nextchar: &'args wstr,
+    pub nextchar_slice: Option<(usize, std::ops::Range<usize>)>,
 
     /// Index in ARGV of the next element to be scanned. This is used for communication to and from
     /// the caller and for communication between successive calls to `getopt`.
@@ -156,11 +156,11 @@ pub const fn wopt(name: &wstr, has_arg: woption_argument_t, val: char) -> woptio
     woption { name, has_arg, val }
 }
 
-impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
+impl<'opts, 'argarray> wgetopter_t<'opts, 'argarray> {
     pub fn new(
         shortopts: &'opts wstr,
         longopts: &'opts [woption],
-        argv: &'argarray mut [&'args wstr],
+        argv: &'argarray mut [WString],
     ) -> Self {
         return wgetopter_t {
             woptopt: '?',
@@ -171,9 +171,9 @@ impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
             initialized: false,
             last_nonopt: 0,
             missing_arg_return_colon: false,
-            nextchar: Default::default(),
+            nextchar_slice: None,
             ordering: Ordering::PERMUTE,
-            woptarg: None,
+            woptarg_idx: None,
             woptind: 0,
         };
     }
@@ -186,6 +186,32 @@ impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
 
     pub fn wgetopt_long_idx(&mut self, opt_index: &mut usize) -> Option<char> {
         return self._wgetopt_internal(opt_index, false);
+    }
+
+    pub fn woptarg(&self) -> Option<&wstr> {
+        self.woptarg_idx
+            .as_ref()
+            .map(|(woptind, range)| &self.argv[*woptind][range.clone()])
+    }
+
+    pub fn cmd(&self) -> &wstr {
+        &self.argv[0]
+    }
+
+    pub fn argv(&self) -> &[WString] {
+        self.argv
+    }
+
+    pub fn argv_mut(&mut self) -> &mut [WString] {
+        self.argv
+    }
+
+    fn nextchar(&self) -> &wstr {
+        self.nextchar_slice
+            .as_ref()
+            .map_or(L!(""), |(optind, range)| {
+                &self.argv()[*optind][range.clone()]
+            })
     }
 
     /// \return the number of arguments.
@@ -208,6 +234,25 @@ impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
         // Exchange the shorter segment with the far end of the longer segment. That puts the shorter
         // segment into the right place. It leaves the longer segment in the right place overall, but it
         // consists of two parts that need to be swapped next.
+
+        let swap = |zelf: &mut Self, left, right| {
+            zelf.argv.swap(left, right);
+            if let Some((ref mut optind, _)) = zelf.woptarg_idx.as_mut() {
+                if *optind == left {
+                    *optind = right;
+                } else if *optind == right {
+                    *optind = left;
+                }
+            }
+            if let Some((ref mut optind, _)) = zelf.nextchar_slice.as_mut() {
+                if *optind == left {
+                    *optind = right;
+                } else if *optind == right {
+                    *optind = left;
+                }
+            }
+        };
+
         while top > middle && middle > bottom {
             if top - middle > middle - bottom {
                 // Bottom segment is the short one.
@@ -215,8 +260,9 @@ impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
 
                 // Swap it with the top part of the top segment.
                 for i in 0..len {
-                    self.argv.swap(bottom + i, top - (middle - bottom) + i);
+                    swap(self, bottom + i, top - (middle - bottom) + i);
                 }
+
                 // Exclude the moved bottom segment from further swapping.
                 top -= len;
             } else {
@@ -225,7 +271,7 @@ impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
 
                 // Swap it with the bottom part of the bottom segment.
                 for i in 0..len {
-                    self.argv.swap(bottom + i, middle + i);
+                    swap(self, bottom + i, middle + i);
                 }
                 // Exclude the moved top segment from further swapping.
                 bottom += len;
@@ -244,7 +290,7 @@ impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
         self.first_nonopt = 1;
         self.last_nonopt = 1;
         self.woptind = 1;
-        self.nextchar = empty_wstr();
+        self.nextchar_slice = None;
 
         let mut optstring = self.shortopts;
 
@@ -324,7 +370,7 @@ impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
             if self.ordering == Ordering::REQUIRE_ORDER {
                 return None;
             }
-            self.woptarg = Some(self.argv[self.woptind]);
+            self.woptarg_idx = Some((self.woptind, 0..self.argv()[self.woptind].len()));
             self.woptind += 1;
             return Some(NONOPTION_CHAR_CODE);
         }
@@ -335,15 +381,17 @@ impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
         } else {
             1
         };
-        self.nextchar = self.argv[self.woptind][skip..].into();
+        self.nextchar_slice = Some((self.woptind, skip..self.argv[self.woptind].len()));
         return Some(char::from(0));
     }
 
     /// Check for a matching short opt.
     fn _handle_short_opt(&mut self) -> char {
         // Look at and handle the next short option-character.
-        let mut c = self.nextchar.char_at(0);
-        self.nextchar = &self.nextchar[1..];
+        let mut c = self.nextchar().char_at(0);
+        if let Some((_optind, ref mut range)) = self.nextchar_slice.as_mut() {
+            range.start += 1;
+        }
 
         let temp = match self.shortopts.chars().position(|sc| sc == c) {
             Some(pos) => &self.shortopts[pos..],
@@ -351,14 +399,14 @@ impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
         };
 
         // Increment `woptind' when we start to process its last character.
-        if self.nextchar.is_empty() {
+        if self.nextchar().is_empty() {
             self.woptind += 1;
         }
 
         if temp.is_empty() || c == ':' {
             self.woptopt = c;
 
-            if !self.nextchar.is_empty() {
+            if !self.nextchar().is_empty() {
                 self.woptind += 1;
             }
             return '?';
@@ -370,17 +418,17 @@ impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
 
         if temp.char_at(2) == ':' {
             // This is an option that accepts an argument optionally.
-            if !self.nextchar.is_empty() {
-                self.woptarg = Some(self.nextchar);
+            if !self.nextchar().is_empty() {
+                self.woptarg_idx = self.nextchar_slice.clone();
                 self.woptind += 1;
             } else {
-                self.woptarg = None;
+                self.woptarg_idx = None;
             }
-            self.nextchar = empty_wstr();
+            self.nextchar_slice = None;
         } else {
             // This is an option that requires an argument.
-            if !self.nextchar.is_empty() {
-                self.woptarg = Some(self.nextchar);
+            if !self.nextchar().is_empty() {
+                self.woptarg_idx = self.nextchar_slice.clone();
                 // If we end this ARGV-element by taking the rest as an arg, we must advance to
                 // the next element now.
                 self.woptind += 1;
@@ -394,10 +442,10 @@ impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
             } else {
                 // We already incremented `woptind' once; increment it again when taking next
                 // ARGV-elt as argument.
-                self.woptarg = Some(self.argv[self.woptind]);
+                self.woptarg_idx = Some((self.woptind, 0..self.argv[self.woptind].len()));
                 self.woptind += 1;
             }
-            self.nextchar = empty_wstr();
+            self.nextchar_slice = None;
         }
 
         return c;
@@ -412,21 +460,23 @@ impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
         retval: &mut char,
     ) {
         self.woptind += 1;
-        assert!(self.nextchar.char_at(nameend) == '\0' || self.nextchar.char_at(nameend) == '=');
-        if self.nextchar.char_at(nameend) == '=' {
+        assert!(
+            self.nextchar().char_at(nameend) == '\0' || self.nextchar().char_at(nameend) == '='
+        );
+        if self.nextchar().char_at(nameend) == '=' {
             if pfound.has_arg != woption_argument_t::no_argument {
-                self.woptarg = Some(self.nextchar[(nameend + 1)..].into());
+                let (optind, range) = self.nextchar_slice.as_ref().unwrap();
+                self.woptarg_idx = Some((*optind, range.start + nameend + 1..range.end));
             } else {
-                self.nextchar = empty_wstr();
+                self.nextchar_slice = None;
                 *retval = '?';
                 return;
             }
         } else if pfound.has_arg == woption_argument_t::required_argument {
             if self.woptind < self.argc() {
-                self.woptarg = Some(self.argv[self.woptind]);
+                self.woptarg_idx = Some((self.woptind, 0..self.argv()[self.woptind].len()));
                 self.woptind += 1;
             } else {
-                self.nextchar = empty_wstr();
                 *retval = if self.missing_arg_return_colon {
                     ':'
                 } else {
@@ -436,7 +486,7 @@ impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
             }
         }
 
-        self.nextchar = empty_wstr();
+        self.nextchar_slice = None;
         *longind = option_index;
         *retval = pfound.val;
     }
@@ -454,7 +504,7 @@ impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
         // Test all long options for either exact match or abbreviated matches.
         for (option_index, p) in self.longopts.iter().enumerate() {
             // Check if current option is prefix of long opt
-            if p.name.starts_with(&self.nextchar[..nameend]) {
+            if p.name.starts_with(&self.nextchar()[..nameend]) {
                 if nameend == p.name.len() {
                     // The current option is exact match of this long option
                     pfound = Some(*p);
@@ -486,14 +536,14 @@ impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
         let mut indfound: usize = 0;
 
         let mut nameend = 0;
-        while self.nextchar.char_at(nameend) != '\0' && self.nextchar.char_at(nameend) != '=' {
+        while self.nextchar().char_at(nameend) != '\0' && self.nextchar().char_at(nameend) != '=' {
             nameend += 1;
         }
 
         let pfound = self._find_matching_long_opt(nameend, &mut exact, &mut ambig, &mut indfound);
 
         if ambig && !exact {
-            self.nextchar = empty_wstr();
+            self.nextchar_slice = None;
             self.woptind += 1;
             *retval = '?';
             return true;
@@ -512,9 +562,9 @@ impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
             || !self
                 .shortopts
                 .as_char_slice()
-                .contains(&self.nextchar.char_at(0))
+                .contains(&self.nextchar().char_at(0))
         {
-            self.nextchar = empty_wstr();
+            self.nextchar_slice = None;
             self.woptind += 1;
             *retval = '?';
             return true;
@@ -544,7 +594,7 @@ impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
     /// If a char in OPTSTRING is followed by a colon, that means it wants an arg, so the following text
     /// in the same ARGV-element, or the text of the following ARGV-element, is returned in `optarg`.
     /// Two colons mean an option that wants an optional arg; if there is text in the current
-    /// ARGV-element, it is returned in `w.woptarg`, otherwise `w.woptarg` is set to zero.
+    /// ARGV-element, it is returned in `w.woptarg()`, otherwise `w.woptarg()` is set to zero.
     ///
     /// If OPTSTRING starts with `-` or `+', it requests different methods of handling the non-option
     /// ARGV-elements. See the comments about RETURN_IN_ORDER and REQUIRE_ORDER, above.
@@ -566,9 +616,9 @@ impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
         if !self.initialized {
             self._wgetopt_initialize();
         }
-        self.woptarg = None;
+        self.woptarg_idx = None;
 
-        if self.nextchar.is_empty() {
+        if self.nextchar().is_empty() {
             let narg = self._advance_to_next_argv();
             if narg != Some(char::from(0)) {
                 return narg;
@@ -589,7 +639,7 @@ impl<'opts, 'args, 'argarray> wgetopter_t<'opts, 'args, 'argarray> {
         //
         // This distinction seems to be the most useful approach.
         if !self.longopts.is_empty() && self.woptind < self.argc() {
-            let arg = self.argv[self.woptind];
+            let arg = &self.argv[self.woptind];
 
             #[allow(clippy::if_same_then_else)]
             #[allow(clippy::needless_bool)]

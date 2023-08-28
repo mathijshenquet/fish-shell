@@ -22,19 +22,24 @@ pub struct Match<'args> {
 }
 
 impl<'args> StringSubCommand<'args> for Match<'args> {
-    const LONG_OPTIONS: &'static [woption<'static>] = &[
-        wopt(L!("all"), no_argument, 'a'),
-        wopt(L!("entire"), no_argument, 'e'),
-        wopt(L!("groups-only"), no_argument, 'g'),
-        wopt(L!("ignore-case"), no_argument, 'i'),
-        wopt(L!("invert"), no_argument, 'v'),
-        wopt(L!("quiet"), no_argument, 'q'),
-        wopt(L!("regex"), no_argument, 'r'),
-        wopt(L!("index"), no_argument, 'n'),
-    ];
-    const SHORT_OPTIONS: &'static wstr = L!(":aegivqrn");
+    fn long_options(&self) -> &'static [woption<'static>] {
+        const opts: &[woption<'static>] = &[
+            wopt(L!("all"), no_argument, 'a'),
+            wopt(L!("entire"), no_argument, 'e'),
+            wopt(L!("groups-only"), no_argument, 'g'),
+            wopt(L!("ignore-case"), no_argument, 'i'),
+            wopt(L!("invert"), no_argument, 'v'),
+            wopt(L!("quiet"), no_argument, 'q'),
+            wopt(L!("regex"), no_argument, 'r'),
+            wopt(L!("index"), no_argument, 'n'),
+        ];
+        opts
+    }
+    fn short_options(&self) -> &'static wstr {
+        L!(":aegivqrn")
+    }
 
-    fn parse_opt(&mut self, _n: &wstr, c: char, _arg: Option<&wstr>) -> Result<(), StringError> {
+    fn parse_opt(&mut self, _w: &mut wgetopter_t<'_, '_>, c: char) -> Result<(), StringError> {
         match c {
             'a' => self.all = true,
             'e' => self.entire = true,
@@ -52,11 +57,11 @@ impl<'args> StringSubCommand<'args> for Match<'args> {
     fn take_args(
         &mut self,
         optind: &mut usize,
-        args: &[&'args wstr],
-        streams: &mut io_streams_t,
+        args: &'args [WString],
+        streams: &mut IoStreams<'_>,
     ) -> Option<libc::c_int> {
-        let cmd = args[0];
-        let Some(arg) = args.get(*optind).copied() else {
+        let cmd = &args[0];
+        let Some(arg) = args.get(*optind) else {
             string_error!(streams, BUILTIN_ERR_ARG_COUNT0, cmd);
             return STATUS_INVALID_ARGS;
         };
@@ -67,15 +72,15 @@ impl<'args> StringSubCommand<'args> for Match<'args> {
 
     fn handle(
         &mut self,
-        parser: &mut parser_t,
-        streams: &mut io_streams_t,
+        parser: &Parser,
+        streams: &mut IoStreams<'_>,
         optind: &mut usize,
-        args: &[&wstr],
+        args: &[WString],
     ) -> Option<libc::c_int> {
-        let cmd = args[0];
+        let cmd = &args[0];
 
         if self.entire && self.index {
-            streams.err.append(wgettext_fmt!(
+            streams.err.append(&wgettext_fmt!(
                 BUILTIN_ERR_COMBO2,
                 cmd,
                 wgettext!("--entire and --index are mutually exclusive")
@@ -84,7 +89,7 @@ impl<'args> StringSubCommand<'args> for Match<'args> {
         }
 
         if self.invert_match && self.groups_only {
-            streams.err.append(wgettext_fmt!(
+            streams.err.append(&wgettext_fmt!(
                 BUILTIN_ERR_COMBO2,
                 cmd,
                 wgettext!("--invert and --groups-only are mutually exclusive")
@@ -93,7 +98,7 @@ impl<'args> StringSubCommand<'args> for Match<'args> {
         }
 
         if self.entire && self.groups_only {
-            streams.err.append(wgettext_fmt!(
+            streams.err.append(&wgettext_fmt!(
                 BUILTIN_ERR_COMBO2,
                 cmd,
                 wgettext!("--entire and --groups-only are mutually exclusive")
@@ -125,7 +130,7 @@ impl<'args> StringSubCommand<'args> for Match<'args> {
             ..
         }) = matcher
         {
-            let vars = parser.get_vars();
+            let vars = parser.vars();
             for (name, vals) in first_match_captures.into_iter() {
                 vars.set(&WString::from(name), EnvMode::default(), vals);
             }
@@ -175,7 +180,7 @@ impl<'opts, 'args> StringMatcher<'opts, 'args> {
     fn report_matches(
         &mut self,
         arg: &wstr,
-        streams: &mut io_streams_t,
+        streams: &mut IoStreams<'_>,
     ) -> Result<(), pcre2::Error> {
         match self {
             Self::Regex(m) => m.report_matches(arg, streams)?,
@@ -233,7 +238,7 @@ impl<'opts, 'args> RegexMatcher<'opts, 'args> {
     fn report_matches(
         &mut self,
         arg: &wstr,
-        streams: &mut io_streams_t,
+        streams: &mut IoStreams<'_>,
     ) -> Result<(), pcre2::Error> {
         let mut iter = self.regex.captures_iter(arg.as_char_slice());
         let cg = iter.next().transpose()?;
@@ -307,12 +312,12 @@ impl<'opts, 'args> RegexMatcher<'opts, 'args> {
         &self,
         arg: &'a wstr,
         cg: Option<Captures<'a>>,
-        streams: &mut io_streams_t,
+        streams: &mut IoStreams<'_>,
     ) -> MatchResult<'a> {
         let Some(cg) = cg else {
             if self.opts.invert_match && !self.opts.quiet {
                 if self.opts.index {
-                    streams.out.append(sprintf!("1 %lu\n", arg.len()));
+                    streams.out.append(&sprintf!("1 %lu\n", arg.len()));
                 } else {
                     streams.out.appendln(arg);
                 }
@@ -341,7 +346,7 @@ impl<'opts, 'args> RegexMatcher<'opts, 'args> {
             if self.opts.index {
                 streams
                     .out
-                    .append(sprintf!("%lu %lu\n", m.start() + 1, m.end() - m.start()));
+                    .append(&sprintf!("%lu %lu\n", m.start() + 1, m.end() - m.start()));
             } else {
                 streams.out.appendln(&arg[m.start()..m.end()]);
             }
@@ -376,7 +381,7 @@ impl<'opts, 'args> WildCardMatcher<'opts, 'args> {
         }
     }
 
-    fn report_matches(&mut self, arg: &wstr, streams: &mut io_streams_t) {
+    fn report_matches(&mut self, arg: &wstr, streams: &mut IoStreams<'_>) {
         // Note: --all is a no-op for glob matching since the pattern is always matched
         // against the entire argument.
         let subject = match self.opts.ignore_case {
@@ -389,7 +394,7 @@ impl<'opts, 'args> WildCardMatcher<'opts, 'args> {
             self.total_matched += 1;
             if !self.opts.quiet {
                 if self.opts.index {
-                    streams.out.append(sprintf!("1 %lu\n", arg.len()));
+                    streams.out.append(&sprintf!("1 %lu\n", arg.len()));
                 } else {
                     streams.out.appendln(arg);
                 }
