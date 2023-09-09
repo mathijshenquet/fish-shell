@@ -4,9 +4,9 @@
 # This one actually prints a NUL
 echo (printf '%s\x00' foo bar | string escape)
 # CHECK: foo\x00bar\x00
-# This one is truncated
+# This one is not truncated
 echo foo\x00bar | string escape
-# CHECK: foo
+# CHECK: foo\x00bar
 # This one is just escaped
 echo foo\\x00bar | string escape
 # CHECK: foo\\x00bar
